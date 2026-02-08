@@ -103,8 +103,8 @@ int main(int argc, char* argv[]) {
     // Instead of looping bins, we store sums for ALL bins at once.
     // bin_replica_sums[binIdx][replicaIdx]
     // replicaIdx 0: Nominal Sum
-    // replicaIdx 1~100: Replica Sums
-    vector<vector<double>> bin_replica_sums(nBins, vector<double>(101, 0.0));
+    // replicaIdx 1~99: Replica Sums
+    vector<vector<double>> bin_replica_sums(nBins, vector<double>(100, 0.0));
 
     // --- Step 1: Single Event Loop (Efficient) ---
     Long64_t nentries = tree->GetEntries();
@@ -126,7 +126,7 @@ int main(int argc, char* argv[]) {
 
         // [CG Method Logic] Accumulate Weights Directly
         // weight_vec index k corresponds to Replica k (0 is Nominal)
-        if (weight_vec->size() >= 101) {
+        if (weight_vec->size() >= 100) {
             for(int k=0; k<=100; ++k) {
                 bin_replica_sums[bIdx][k] += weight_vec->at(k);
             }
