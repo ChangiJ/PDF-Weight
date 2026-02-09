@@ -1,16 +1,24 @@
 // -------------------------------------------------------------------------
-// Plot PDF Variations (CG Method - Single Canvas Grid Layout)
-// File: plot_pdf_variations_CG_mj_bin_v2.cpp
+// Plot PDF Variations (CG Method with Mj Binning - Grid Layout)
+// File: plot_pdf_variations_CG_mj_bin_v3.cpp
 //
-// [Logic]
-// 1. Data Collection: Single Loop -> [PhysicalBin][MjBin][Replica]
-// 2. Visualization:
-//    - Canvas divided into 3 Columns (Njets) x 5 Rows (Nb).
-//    - Maps each Physical Bin to the correct Pad.
-//    - X-axis: Mj12 Bins (500-800, 800-1100, 1100+).
+// [Logic Flow]
+// 1. Accumulate:
+//    - Loop over Events.
+//    - Identify (Physical Bin, Mj Bin).
+//    - Sum weights for all 100 replicas:
+//      sum[bin][mj][k] += weight[k]
 //
-// compile: g++ -o plot_pdf_variations_CG_mj_bin_v2.exe plot_pdf_variations_CG_mj_bin_v2.cpp $(root-config --cflags --glibs)
-// run: ./plot_pdf_variations_CG_mj_bin_v2.exe final_output.root
+// 2. Process (Per Physical Bin & Per Mj Bin):
+//    - Calculate Nominal Sum (k=0).
+//    - Calculate Ratios for all k: Ratio[k] = Sum[k] / Sum[0].
+//    - Fill Cyan Lines (All 100 Ratios).
+//    - Sort Ratios.
+//    - Identify 16th/84th percentile Ratios.
+//    - Fill Blue Lines (Envelope).
+//
+// compile: g++ -o plot_pdf_variations_CG_mj_bin_v3.exe plot_pdf_variations_CG_mj_bin_v3.cpp $(root-config --cflags --glibs)
+// run: ./plot_pdf_variations_CG_mj_bin_v3.exe final_output.root
 // -------------------------------------------------------------------------
 
 #include <iostream>
@@ -81,33 +89,11 @@ int getBinNumber(int njets, int nbm) {
 // Helper: Map Bin Number to Pad Number (1~15)
 // Grid: 3 Cols (Njets) x 5 Rows (Nb)
 int getPadNumber(int binNum) {
-    // Row 0 (Nb=0): Pads 1, 2, 3
-    if (binNum == 22) return 1;
-    if (binNum == 23) return 2;
-    if (binNum == 24) return 3;
-
-    // Row 1 (Nb=1): Pads 4, 5, 6
-    if (binNum == 25) return 4;
-    if (binNum == 26) return 5;
-    if (binNum == 27) return 6;
-
-    // Row 2 (Nb=2): Pads 7, 8, 9
-    if (binNum == 28) return 7;
-    if (binNum == 29) return 8;
-    if (binNum == 30) return 9;
-
-    // Row 3 (Nb=3): Pads 10, 11, 12
-    if (binNum == 31) return 10;
-    if (binNum == 32) return 11;
-    if (binNum == 33) return 12;
-
-    // Row 4 (Nb>=4): Pads 13, 14, 15
-    // Pad 13 corresponds to Nb>=4, Low Njet (Merged into Bin 31).
-    // Bin 35 -> Pad 14
-    // Bin 36 -> Pad 15
-    if (binNum == 35) return 14;
-    if (binNum == 36) return 15;
-
+    if (binNum == 22) return 1; if (binNum == 23) return 2; if (binNum == 24) return 3;
+    if (binNum == 25) return 4; if (binNum == 26) return 5; if (binNum == 27) return 6;
+    if (binNum == 28) return 7; if (binNum == 29) return 8; if (binNum == 30) return 9;
+    if (binNum == 31) return 10; if (binNum == 32) return 11; if (binNum == 33) return 12;
+    if (binNum == 35) return 14; if (binNum == 36) return 15;
     return -1;
 }
 
@@ -120,16 +106,13 @@ int getMjBinIndex(float mj12) {
 }
 
 int main(int argc, char* argv[]) {
-    // Style Settings
     gStyle->SetOptStat(0);
     gStyle->SetOptTitle(0);
     gStyle->SetPadTickX(1);
     gStyle->SetPadTickY(1);
-    gStyle->SetTitleSize(0.08, "XY");
-    gStyle->SetLabelSize(0.08, "XY");
 
     if (argc < 2) {
-        cout << "Usage: ./plot_pdf_variations_CG_mj_bin_v2.exe [root_file]" << endl;
+        cout << "Usage: ./plot_pdf_variations_CG_mj_bin_v3.exe [root_file]" << endl;
         return 1;
     }
 
@@ -157,25 +140,25 @@ int main(int argc, char* argv[]) {
     tree->SetBranchAddress("nbm", &nbm);
     tree->SetBranchAddress("mj12", &mj12);
 
-    // --- Data Storage (3D Array) ---
+    // --- Data Storage (Accumulator) ---
     // [PhysicalBin][MjBin][Replica]
-    vector<vector<vector<double>>> data(nBins,
+    // 14 Bins, 3 Mj Bins, 100 Replicas
+    vector<vector<vector<double>>> bin_mj_replica_sums(nBins,
         vector<vector<double>>(nMjBins,
             vector<double>(100, 0.0)
         )
     );
 
-    // --- Step 1: Single Event Loop ---
+    // --- Step 1: Event Loop (Accumulate Sums) ---
     Long64_t nentries = tree->GetEntries();
-    cout << "Processing " << nentries << " events..." << endl;
+    cout << "Step 1: Accumulating weights from " << nentries << " events..." << endl;
 
     for (Long64_t i = 0; i < nentries; ++i) {
         tree->GetEntry(i);
         if (!weight_vec || weight_vec->empty()) continue;
-
         if (nleps != 1) continue;
 
-        // 1. Binning
+        // 1. Identify Bins
         int binNum = getBinNumber(njets, nbm);
         if (binNum == -1) continue;
         int bIdx = getIdx(binNum);
@@ -184,114 +167,117 @@ int main(int argc, char* argv[]) {
         int mIdx = getMjBinIndex(mj12);
         if (mIdx == -1) continue;
 
-        // 2. Accumulate (CG Method)
+        // 2. Accumulate Weights (Summing w_pdf[evt][k])
         if (weight_vec->size() >= 100) {
             for(int k=0; k<100; ++k) {
-                data[bIdx][mIdx][k] += weight_vec->at(k);
+                bin_mj_replica_sums[bIdx][mIdx][k] += weight_vec->at(k);
             }
         }
     }
 
-    // --- Step 2: Draw on Single Canvas ---
-    cout << "Drawing on Grid Canvas..." << endl;
+    // --- Step 2: Drawing on Grid Canvas ---
+    cout << "Step 2: Processing and Drawing..." << endl;
 
-    // A large canvas for 3x5 grid
-    TCanvas* c1 = new TCanvas("c1", "PDF Variations Grid", 1200, 1600);
-    c1->Divide(3, 5, 0.01, 0.01); // 3 Cols, 5 Rows, Small spacing
+    TCanvas* c1 = new TCanvas("c1", "PDF Variations Grid v3", 1200, 1600);
+    c1->Divide(3, 5, 0.01, 0.01);
 
-    // Store histograms to prevent deletion before saving
-    vector<TH1D*> trash_bin;
+    vector<TH1D*> trash_bin; // To keep histograms alive
 
+    // Loop over Physical Bins (The 15 Pads)
     for (int b = 0; b < nBins; ++b) {
         int binNum = binNumbers[b];
         int padNum = getPadNumber(binNum);
-
         if (padNum < 1 || padNum > 15) continue;
 
         c1->cd(padNum);
-        gPad->SetTopMargin(0.05);
-        gPad->SetBottomMargin(0.15);
-        gPad->SetLeftMargin(0.15);
-        gPad->SetRightMargin(0.05);
+        gPad->SetTopMargin(0.05); gPad->SetBottomMargin(0.15);
+        gPad->SetLeftMargin(0.15); gPad->SetRightMargin(0.05);
 
-        // Create Histograms
+        // Prepare Histograms for this Pad
         TH1D* h_nom = new TH1D(Form("h_nom_%d", b), "", nMjBins, 0, nMjBins);
         TH1D* h_up  = new TH1D(Form("h_up_%d", b), "", nMjBins, 0, nMjBins);
         TH1D* h_down = new TH1D(Form("h_down_%d", b), "", nMjBins, 0, nMjBins);
         trash_bin.push_back(h_nom); trash_bin.push_back(h_up); trash_bin.push_back(h_down);
 
-        vector<TH1D*> h_reps;
+        // 100 Histograms for Cyan Lines
+        vector<TH1D*> h_reps(100);
         for(int k=0; k<100; ++k) {
-            TH1D* h = new TH1D(Form("h_rep_%d_%d", b, k), "", nMjBins, 0, nMjBins);
-            h_reps.push_back(h);
-            trash_bin.push_back(h);
+            h_reps[k] = new TH1D(Form("h_rep_%d_%d", b, k), "", nMjBins, 0, nMjBins);
+            trash_bin.push_back(h_reps[k]);
         }
 
-        // Process Data (Sort & Fill)
+        // --- Inner Loop: Mj Bins (X-axis) ---
+        // For each Mj bin, calculate ratios, sort, and fill histograms
         for (int m = 0; m < nMjBins; ++m) {
-            vector<double> replicas = data[b][m];
-            double nom_val = replicas[0];
-            if (nom_val == 0) nom_val = 1.0;
 
+            // 1. Get the accumulated sums for this (Bin, Mj)
+            // This vector contains [Sum_k0, Sum_k1, ..., Sum_k99]
+            vector<double> current_sums = bin_mj_replica_sums[b][m];
+
+            // 2. Get Nominal Sum (Index 0)
+            double nom_sum = current_sums[0];
+            if (nom_sum == 0) nom_sum = 1.0; // Safety
+
+            // 3. Calculate Ratios & Fill Cyan Lines (Before Sorting)
+            // We fill h_reps[k] with the ratio of the k-th universe
             for(int k=0; k<100; ++k) {
-                h_reps[k]->SetBinContent(m+1, replicas[k] / nom_val);
+                double ratio = current_sums[k] / nom_sum;
+                h_reps[k]->SetBinContent(m+1, ratio);
             }
 
-            std::sort(replicas.begin(), replicas.end());
+            // 4. Sort to find Envelope (CG Method Logic)
+            // We sort the raw sums (or ratios) to find 16th/84th percentiles
+            std::sort(current_sums.begin(), current_sums.end());
 
-            double val_16 = replicas[15];
-            double val_84 = replicas[83];
+            double val_16 = current_sums[15]; // 16th value
+            double val_84 = current_sums[83]; // 84th value
 
+            // 5. Fill Envelope Lines (Blue)
             h_nom->SetBinContent(m+1, 1.0);
-            h_down->SetBinContent(m+1, val_16 / nom_val);
-            h_up->SetBinContent(m+1, val_84 / nom_val);
+            h_down->SetBinContent(m+1, val_16 / nom_sum); // Ratio of 16th sum
+            h_up->SetBinContent(m+1, val_84 / nom_sum);   // Ratio of 84th sum
         }
 
-        // Draw
-        h_nom->GetYaxis()->SetRangeUser(0.80, 1.20);
-        h_nom->GetXaxis()->SetLabelSize(0.08); // Big labels for small pads
+        // --- Drawing ---
+        h_nom->GetYaxis()->SetRangeUser(0.85, 1.15);
+        h_nom->GetXaxis()->SetLabelSize(0.08);
         h_nom->GetYaxis()->SetLabelSize(0.08);
         h_nom->GetYaxis()->SetNdivisions(505);
-
-        // Custom X Labels for readability
         for(int m=0; m<nMjBins; ++m) h_nom->GetXaxis()->SetBinLabel(m+1, mjLabels[m].c_str());
 
-        h_nom->Draw("HIST");
+        h_nom->Draw("HIST"); // Axis Frame
 
+        // Draw all 100 Replicas (Cyan)
         for(auto h : h_reps) {
             h->SetLineColor(kCyan);
             h->SetLineWidth(1);
             h->Draw("HIST SAME");
         }
 
+        // Draw Envelope (Blue)
         h_up->SetLineColor(kBlue); h_up->SetLineWidth(2); h_up->Draw("HIST SAME");
         h_down->SetLineColor(kBlue); h_down->SetLineWidth(2); h_down->Draw("HIST SAME");
 
+        // Draw Nominal (Black Dashed)
         h_nom->SetLineColor(kBlack); h_nom->SetLineWidth(2); h_nom->SetLineStyle(2);
         h_nom->Draw("HIST SAME");
 
-        // Pad Label (Bin Name)
+        // Label
         TLatex latex;
-        latex.SetNDC();
-        latex.SetTextSize(0.12);
-        latex.DrawLatex(0.20, 0.85, Form("Bin %d", binNum));
+        latex.SetNDC(); latex.SetTextSize(0.12);
+        latex.DrawLatex(0.20, 0.82, Form("Bin %d", binNum));
     }
 
-    // Add info text on the empty pad (Pad 13) if needed
+    // Info for empty pad
     c1->cd(13);
-    TLatex info;
-    info.SetNDC();
-    info.SetTextSize(0.08);
+    TLatex info; info.SetNDC(); info.SetTextSize(0.08);
 //    info.DrawLatex(0.1, 0.5, "Bin 31 Merged");
-//    info.DrawLatex(0.1, 0.4, "(Low Njets)");
 
-    // Save
-    c1->SaveAs("plot_pdf_variations_CG_mj_bin_v2.png");
-    c1->SaveAs("plot_pdf_variations_CG_mj_bin_v2.pdf");
+    c1->SaveAs("plot_pdf_variations_CG_mj_bin_v3.png");
+    c1->SaveAs("plot_pdf_variations_CG_mj_bin_v3.pdf");
 
-    cout << "Saved grid plots to plot_pdf_variations_CG_mj_bin_v2.png" << endl;
+    cout << "Saved grid plots to plot_pdf_variations_CG_mj_bin_v3.png" << endl;
 
-    // Cleanup
     for(auto h : trash_bin) delete h;
     delete c1;
     file->Close();
